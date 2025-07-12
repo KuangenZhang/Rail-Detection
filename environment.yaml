@@ -3,9 +3,7 @@ channels:
   - pytorch-lts
   - pytorch
   - nvidia
-  - http://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free
   - conda-forge
-  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main
   - defaults
 dependencies:
   - _ipyw_jlab_nb_ext_conf=0.1.0=py38_0
@@ -411,4 +409,3 @@ dependencies:
     - tqdm==4.43.0
     - ujson==1.35
     - xmljson==0.2.0
-prefix: /home/xinpeng/anaconda3/envs/rail

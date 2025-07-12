@@ -19,3 +19,5 @@ model2.py
 dataset/*
 
 log
+
+checkpoints/*

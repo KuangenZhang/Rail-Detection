@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     net = parsingNet(pretrained = False, backbone='18', cls_dim = (griding_num+1, len(raildb_row_anchor), 4),).cuda()
 
-    state_dict = torch.load('../best_model.pth', map_location='cpu')
+    state_dict = torch.load('checkpoints/best_model.pth', map_location='cuda')
     compatible_state_dict = {}
     for k, v in state_dict.items():
         if 'module.' in k:

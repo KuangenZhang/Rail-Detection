@@ -1,20 +1,20 @@
-from wsgiref import validate
-from matplotlib.pyplot import plot
-import torch, os, datetime, copy, json, scipy, time, sys, cv2
+import torch, os, datetime, copy, json, scipy, cv2
 import numpy as np
-from IPython import embed
-from model_seg import parsingNet
 
-sys.path.append("..")
+from model.model import parsingNet
 from data.dataloader import get_train_loader
-from data.constant import raildb_row_anchor
-sys.path.append("..")
-from utils.evaluation import LaneEval, mask_2_inter
+from data.dataset import raildb_row_anchor
+from utils.evaluation import LaneEval, grid_2_inter
+
 from utils.dist_utils import dist_print, dist_tqdm, is_main_process
-from utils.factory import get_metric_dict_seg, get_loss_dict_seg, get_optimizer, get_scheduler
+from utils.factory import get_metric_dict, get_loss_dict, get_optimizer, get_scheduler
 from utils.metrics import update_metrics, reset_metrics
+
 from utils.common import merge_config, save_model, cp_projects
 from utils.common import get_work_dir, get_logger
+
+import time
+from IPython import embed
 
 color_list = [(0,0,225), (255,0,0), (0,225,0), (255,0,225), (255,255,225), (0,255,255), (255,255,0), (125,255,255)]
 thickness_list = [1, 3, 5, 7, 9, 11, 13, 15]
@@ -22,15 +22,15 @@ thickness_list.reverse()
 
 def inference(net, data_label):
 
-    img, _, _, seg_label, _ = data_label
-    img, seg_label = img.cuda(), seg_label.long().cuda()
-    seg_out = net(img)
-    return {'seg_out': seg_out, 'seg_label': seg_label}
+    img, cls_label, _, _, _ = data_label
+    img, cls_label = img.cuda(), cls_label.long().cuda()
+    cls_out = net(img)
+    return {'cls_out': cls_out, 'cls_label': cls_label}
 
 def resolve_val_data(results):
-    # input: (batch_size, num_of_lanes+1, width, length)
-    # output: (batch_size, width, length)
-    results['seg_out'] = torch.argmax(results['seg_out'], dim=1)
+    # input: (batch_size, num_gridding, num_cls_per_lane, num_of_lanes)
+    # output: (batch_size, num_cls_per_lane, num_of_lanes)
+    results['cls_out'] = torch.argmax(results['cls_out'], dim=1)
     return results
 
 def calc_loss(loss_dict, results, logger, global_step):
@@ -100,11 +100,11 @@ def validate(net, val_loader, logger, metric_dict, savefig=[]):
         global_step = b_idx
 
         results = inference(net, data_label)
-        preds_out = (torch.argmax(torch.nn.functional.interpolate(results['seg_out'], (720, 1280)), dim=1)).cpu().numpy()
+        preds_inter = [grid_2_inter(out, cfg.griding_num) for out in results['cls_out']]
+        # print(pred)
+        gt = data_label[2].cpu().numpy()
+        # print(gt)
         
-        preds_inter = [mask_2_inter(out, raildb_row_anchor) for out in preds_out]
-        gt = data_label[-3].cpu().numpy()
-
         if len(savefig)!=0:
             for idx, item in enumerate(data_label[-1]):
                 vis = cv2.resize(cv2.imread(os.path.join(savefig[0], item)), (1280, 720))
@@ -113,14 +113,13 @@ def validate(net, val_loader, logger, metric_dict, savefig=[]):
                 for i in range(preds_inter[idx].shape[0]):
                     points = [[int(x),int(y)] for (x,y) in zip(preds_inter[idx][i], raildb_row_anchor) if x>=0]
                     cv2.polylines(vis, (np.asarray([points])).astype(np.int32), False, color_list[i], thickness=thickness_list[i])
+                    cv2.polylines(vis_mask, (np.asarray([points])).astype(np.int32), False, color_list[i], thickness=thickness_list[i])
 
-                    vis_mask[(preds_out[idx])==(i+1)] = color_list[i]
-
-                vis_path = os.path.join(savefig[0], 'segmentation/vis', item).replace('pic', savefig[1])
+                vis_path = os.path.join(savefig[0], 'row_based/vis', item).replace('pic', savefig[1])
                 if not os.path.exists(os.path.dirname(vis_path)): os.makedirs(os.path.dirname(vis_path))
                 cv2.imwrite(vis_path, vis)
 
-                pred_path = os.path.join(savefig[0], 'segmentation/pred', item).replace('pic', savefig[1])
+                pred_path = os.path.join(savefig[0], 'row_based/pred', item).replace('pic', savefig[1])
                 if not os.path.exists(os.path.dirname(pred_path)): os.makedirs(os.path.dirname(pred_path))
                 cv2.imwrite(pred_path, vis)
 
@@ -142,14 +141,56 @@ def validate(net, val_loader, logger, metric_dict, savefig=[]):
         gts.append(gt)
 
     preds = np.concatenate(preds); gts = np.concatenate(gts)
-    for i in range(1, 21):
-        LaneEval.pixel_thresh = i
-        res = LaneEval.bench_all(preds, gts, raildb_row_anchor)
-        res = json.loads(res)
-        for r in res:
-            dist_print(r['name'], r['value']) 
+    res = LaneEval.bench_all(preds, gts, raildb_row_anchor)
+    res = json.loads(res)
+    for r in res:
+        dist_print(r['name'], r['value']) 
+
+    # for i in range(1, 21):
+    #     LaneEval.pixel_thresh = i
+    #     res = LaneEval.bench_all(preds, gts, raildb_row_anchor)
+    #     res = json.loads(res)
+    #     for r in res:
+    #         dist_print(r['name'], r['value']) 
     
     return acc_top1
+
+def validateplus(cfg, distributed, best_model, logger, metric_dict):
+    dist_print('*************    validate sun      ***************')
+    val_sun_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='sun')
+    validate(best_model, val_sun_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'sun'])
+    
+    dist_print('*************    validate rain      ***************')
+    val_rain_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='rain')
+    validate(best_model, val_rain_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'rain'])
+    
+    dist_print('*************    validate night      ***************')
+    val_night_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='night')
+    validate(best_model, val_night_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'night'])
+    
+    dist_print('*************    validate line      ***************')
+    val_line_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='line')
+    validate(best_model, val_line_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'line'])
+
+    dist_print('*************    validate cross      ***************')
+    val_cross_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='cross')
+    validate(best_model, val_cross_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'cross'])
+
+    dist_print('*************    validate curve      ***************')
+    val_curve_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='curve')
+    validate(best_model, val_curve_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'curve'])
+
+    dist_print('*************    validate slope      ***************')
+    val_slope_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='slope')
+    validate(best_model, val_slope_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'slope'])
+
+    dist_print('*************    validate near      ***************')
+    val_near_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='near')
+    validate(best_model, val_near_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'near'])
+
+    dist_print('*************    validate far      ***************')
+    val_far_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='far')
+    validate(best_model, val_far_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'far'])
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
@@ -167,19 +208,10 @@ if __name__ == "__main__":
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
     dist_print(datetime.datetime.now().strftime('[%Y/%m/%d %H:%M:%S]') + ' start training...')
     dist_print(cfg)
-    assert cfg.backbone in ['18','34','50','101','152','50next','101next','50wide','101wide']
+    assert cfg.backbone in ['18','34','50','mobilenet_v2', 'squeezenet1_0', 'vit_b_16',]
 
     train_loader, cls_num_per_lane = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='train', type=cfg.type)
     val_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='all')
-    val_sun_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='sun')
-    val_rain_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='rain')
-    val_night_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='night')
-    val_line_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='line')
-    val_cross_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='cross')
-    val_curve_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='curve')
-    val_slope_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='slope')
-    val_near_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='near')
-    val_far_loader, _ = get_train_loader(cfg.batch_size, cfg.data_root, cfg.griding_num, distributed, cfg.num_lanes, mode='val', type='far')
 
     net = parsingNet(pretrained = True, backbone=cfg.backbone, cls_dim = (cfg.griding_num+1, cls_num_per_lane, cfg.num_lanes)).cuda()
 
@@ -207,40 +239,25 @@ if __name__ == "__main__":
 
     scheduler = get_scheduler(optimizer, cfg, len(train_loader))
     dist_print(len(train_loader))
-    metric_dict = get_metric_dict_seg(cfg)
-    loss_dict = get_loss_dict_seg(cfg)
+    metric_dict = get_metric_dict(cfg)
+    loss_dict = get_loss_dict(cfg)
     logger = get_logger(work_dir, cfg)
     cp_projects(args.auto_backup, work_dir)
     
-    # best_acc = 0; best_epoch = 0; best_model = None
-    # for epoch in range(resume_epoch, cfg.epoch):
-    #     train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, metric_dict)
-    #     acc = validate(net, val_loader, logger, metric_dict)
-    #     if acc > best_acc: best_acc, best_epoch, best_model = acc, epoch, copy.deepcopy(net)
-    #     save_model(net, optimizer, epoch, work_dir, distributed)
+    best_acc = 0; best_epoch = 0; best_model = None
+    for epoch in range(resume_epoch, cfg.epoch):
+        train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, metric_dict)
+        acc = validate(net, val_loader, logger, metric_dict)
+        if acc > best_acc: best_acc, best_epoch, best_model = acc, epoch, copy.deepcopy(net)
+        save_model(net, optimizer, epoch, work_dir, distributed)
+    
+    # net.load_state_dict(torch.load('/home/ssd7T/lxpData/RAIL-DB/log/rail/best_0.893.pth', map_location='cpu'))
+    # best_model = copy.deepcopy(net)
 
-    net.load_state_dict(torch.load('/home/ssd7T/lxpData/rail/log/rail_seg/best_0.747.pth', map_location='cpu'))
-    best_model = copy.deepcopy(net)
     dist_print('*************    validate all      ***************')
-    validate(best_model, val_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'all'])
-    # dist_print('*************    validate sun      ***************')
-    # validate(best_model, val_sun_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'sun'])
-    # dist_print('*************    validate rain      ***************')
-    # validate(best_model, val_rain_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'rain'])
-    # dist_print('*************    validate night      ***************')
-    # validate(best_model, val_night_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'night'])
-    # dist_print('*************    validate line      ***************')
-    # validate(best_model, val_line_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'line'])
-    # dist_print('*************    validate cross      ***************')
-    # validate(best_model, val_cross_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'cross'])
-    # dist_print('*************    validate curve      ***************')
-    # validate(best_model, val_curve_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'curve'])
-    # dist_print('*************    validate slope      ***************')
-    # validate(best_model, val_slope_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'slope'])
-    # dist_print('*************    validate near      ***************')
-    # validate(best_model, val_near_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'near'])
-    # dist_print('*************    validate far      ***************')
-    # validate(best_model, val_far_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'far'])
+    validate(best_model, val_loader, logger, metric_dict,) # savefig=[cfg.data_root, 'all'])
+    # validateplus(cfg, distributed, best_model, logger, metric_dict)
+    
     logger.close()
-    # dist_print(best_acc, best_epoch)
-    # if is_main_process(): torch.save(best_model.state_dict(), os.path.join(work_dir, 'best_{:.3f}.pth'.format(best_acc)))
+    dist_print(best_acc, best_epoch)
+    if is_main_process(): torch.save(best_model.state_dict(), os.path.join(work_dir, 'best_{:.3f}.pth'.format(best_acc)))
