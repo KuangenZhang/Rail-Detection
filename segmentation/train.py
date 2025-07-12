@@ -14,7 +14,7 @@ from utils.dist_utils import dist_print, dist_tqdm, is_main_process
 from utils.factory import get_metric_dict_seg, get_loss_dict_seg, get_optimizer, get_scheduler
 from utils.metrics import update_metrics, reset_metrics
 from utils.common import merge_config, save_model, cp_projects
-from utils.common import get_work_dir, get_logger
+from utils.common import get_work_dir
 
 color_list = [(0,0,225), (255,0,0), (0,225,0), (255,0,225), (255,255,225), (0,255,255), (255,255,0), (125,255,255)]
 thickness_list = [1, 3, 5, 7, 9, 11, 13, 15]
@@ -33,7 +33,7 @@ def resolve_val_data(results):
     results['seg_out'] = torch.argmax(results['seg_out'], dim=1)
     return results
 
-def calc_loss(loss_dict, results, logger, global_step):
+def calc_loss(loss_dict, results, global_step):
     loss = 0
 
     for i in range(len(loss_dict['name'])):
@@ -43,15 +43,10 @@ def calc_loss(loss_dict, results, logger, global_step):
         datas = [results[src] for src in data_src]
         loss_cur = loss_dict['op'][i](*datas)
 
-        if global_step % 20 == 0:
-            # print(loss_cur)
-
-            logger.add_scalar('loss/'+loss_dict['name'][i], loss_cur, global_step)
-
         loss += loss_cur * loss_dict['weight'][i]
     return loss
 
-def train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, metric_dict):
+def train(net, train_loader, loss_dict, optimizer, scheduler, epoch, metric_dict):
     dist_print('*****************   Training   ***********************')
     net.train(mode=True)
     progress_bar = dist_tqdm(train_loader)
@@ -64,7 +59,7 @@ def train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, met
         t_net_0 = time.time()
         results = inference(net, data_label)
 
-        loss = calc_loss(loss_dict, results, logger, global_step)
+        loss = calc_loss(loss_dict, results, global_step)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -74,10 +69,6 @@ def train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, met
         results = resolve_val_data(results)
 
         update_metrics(metric_dict, results)
-        if global_step % 20 == 0:
-            for me_name, me_op in zip(metric_dict['name'], metric_dict['op']):
-                logger.add_scalar('metric/' + me_name, me_op.get(), global_step=global_step)
-        logger.add_scalar('meta/lr', optimizer.param_groups[0]['lr'], global_step=global_step)
 
         if hasattr(progress_bar, 'set_postfix'):
             kwargs = {me_name: '%.3f' % me_op.get() for me_name, me_op in zip(metric_dict['name'], metric_dict['op'])}
@@ -87,7 +78,7 @@ def train(net, train_loader, loss_dict, optimizer, scheduler, logger, epoch, met
                                     **kwargs)
         t_data_0 = time.time()
 
-def validate(net, val_loader, logger, metric_dict, savefig=[]):
+def validate(net, val_loader, metric_dict, savefig=[]):
     dist_print('*****************   Validating   ***********************')
     net.train(mode=False)
     progress_bar = dist_tqdm(val_loader)
@@ -128,8 +119,6 @@ def validate(net, val_loader, logger, metric_dict, savefig=[]):
         update_metrics(metric_dict, results)
         t_data_0 = time.time()
 
-        for me_name, me_op in zip(metric_dict['name'], metric_dict['op']):
-            logger.add_scalar('metric/' + me_name, me_op.get(), global_step=global_step)
         acc_top1 = metric_dict['op'][0].get()
 
         if hasattr(progress_bar, 'set_postfix'):
@@ -209,7 +198,6 @@ if __name__ == "__main__":
     dist_print(len(train_loader))
     metric_dict = get_metric_dict_seg(cfg)
     loss_dict = get_loss_dict_seg(cfg)
-    logger = get_logger(work_dir, cfg)
     cp_projects(args.auto_backup, work_dir)
     
     # best_acc = 0; best_epoch = 0; best_model = None
@@ -222,7 +210,7 @@ if __name__ == "__main__":
     net.load_state_dict(torch.load('/home/ssd7T/lxpData/rail/log/rail_seg/best_0.747.pth', map_location='cpu'))
     best_model = copy.deepcopy(net)
     dist_print('*************    validate all      ***************')
-    validate(best_model, val_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'all'])
+    validate(best_model, val_loader, metric_dict, ) # savefig=[cfg.data_root, 'all'])
     # dist_print('*************    validate sun      ***************')
     # validate(best_model, val_sun_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'sun'])
     # dist_print('*************    validate rain      ***************')
@@ -241,6 +229,5 @@ if __name__ == "__main__":
     # validate(best_model, val_near_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'near'])
     # dist_print('*************    validate far      ***************')
     # validate(best_model, val_far_loader, logger, metric_dict, ) # savefig=[cfg.data_root, 'far'])
-    logger.close()
     # dist_print(best_acc, best_epoch)
     # if is_main_process(): torch.save(best_model.state_dict(), os.path.join(work_dir, 'best_{:.3f}.pth'.format(best_acc)))

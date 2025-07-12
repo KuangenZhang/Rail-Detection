@@ -1,16 +1,10 @@
-import torch, os, cv2, sys
-import scipy.special, tqdm
+import torch, cv2, sys
 import numpy as np
 import torchvision.transforms as transforms
 from PIL import Image
 
-sys.path.append("..")
-
 from model.model import parsingNet
-from utils.common import merge_config
-from utils.dist_utils import dist_print
 from utils.evaluation import grid_2_inter
-from IPython import embed
 
 color_list = [(0,0,225), (255,0,0), (0,225,0), (255,0,225), (255,255,225), (0,255,255), (255,255,0), (125,255,255)]
 thickness_list = [1, 3, 5, 7, 9, 11, 13, 15]
@@ -87,13 +81,8 @@ def deploy_videos(video_path, net):
     
 
 if __name__ == "__main__":
-    torch.backends.cudnn.benchmark = True
-    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-    dist_print('start testing...')
-
     net = parsingNet(pretrained = False, backbone='18', cls_dim = (griding_num+1, len(raildb_row_anchor), 4),).cuda()
-
-    state_dict = torch.load('checkpoints/best_model.pth', map_location='cuda')
+    state_dict = torch.load('checkpoints/best_model.pth', map_location='cpu')
     compatible_state_dict = {}
     for k, v in state_dict.items():
         if 'module.' in k:

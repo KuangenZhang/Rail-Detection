@@ -1,6 +1,6 @@
 
 import os, argparse
-from utils.dist_utils import is_main_process, dist_print, DistSummaryWriter
+from utils.dist_utils import is_main_process, dist_print
 from utils.config import Config
 import torch
 import time
@@ -103,7 +103,6 @@ def get_work_dir(cfg):
     return work_dir
 
 def get_logger(work_dir, cfg):
-    logger = DistSummaryWriter(work_dir)
     config_txt = os.path.join(work_dir, 'cfg.txt')
     if is_main_process():
         with open(config_txt, 'w') as fp:
