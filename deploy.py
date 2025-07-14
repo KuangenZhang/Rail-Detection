@@ -92,7 +92,7 @@ if __name__ == "__main__":
 
     net.load_state_dict(compatible_state_dict, strict=False)
     net.eval()
-    deploy_videos('./example.mp4', net)
-    # deploy_image('./example.jpg', net)
+    # deploy_videos('dataset/example.mp4', net)
+    deploy_image('/home/kuangen/Projects/Rail-Detection/dataset/RailDB/pic/fixed_day/fixed_day_000001.jpeg', net)
 
 # python deploy.py
